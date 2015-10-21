@@ -1,0 +1,12 @@
+[Unit]
+Description=Runs btrfs-balance on / every day
+
+[Timer]
+# Time to wait after booting before we run first time
+OnBootSec=1h
+# Time between running each consecutive time
+OnUnitActiveSec=1d
+Unit=btrfs-balance@var-cache-btrfs_pool_SYSTEM.service
+
+[Install]
+WantedBy=var-cache-btrfs_pool_SYSTEM.mount

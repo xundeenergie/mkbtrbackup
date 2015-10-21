@@ -1,0 +1,16 @@
+[Unit]
+Description=Balance btrfs-filesystem %f
+ConditionPathExists=!/run/btrfs-balance-systemd.lock
+ConditionPathExists=!/run/mkbackup-systemd.lock
+Conflicts=suspend.target shutdown.target
+Wants=status-email-root@%n.service
+Before=status-email-root@%n.service
+OnFailure=status-email-root@%n.service
+
+[Service]
+IOSchedulingClass=3
+ExecStartPre=/bin/touch /run/btrfs-balance-systemd.lock
+ExecStart=/bin/btrfs balance start -dusage=55 -v %f
+#ExecStop=/bin/btrfs balance cancel %f
+ExecStopPost=/bin/rm /run/btrfs-balance-systemd.lock
+

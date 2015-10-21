@@ -1,0 +1,37 @@
+[Unit]
+Description=Make %i-backup from system-subvolume
+ConditionPathExists=!/run/mkbackup
+ConditionPathExists=!/run/btrfs-balance-systemd.lock
+#Requires=var-cache-btrfs_pool_SYSTEM.mount set-environ.service
+Requires=set-environ.service
+Conflicts=suspend.target shutdown.target sleep.target
+Wants=update-backuplinks.target dpkg-get-selection.service
+Before=update-backuplinks.target
+After=set-environ.service dpkg-get-selection.service basic.target
+OnFailure=status-email-root@%n.service
+
+[Service]
+#Type=oneshot
+Type=idle
+EnvironmentFile=/etc/mkbtrbackup.conf.d/%i.conf
+RuntimeDirectory=mkbackup
+#Nice=
+IOSchedulingClass=3
+#IOSchedulingPriority=
+
+ExecStartPre=/bin/sh -c "(/bin/systemctl is-active -q mkbackup.target)"
+ExecStart=/usr/local/bin/mkbtrbackup create --interval %i ${SRC}/${SYSSUBVOL} --cleanup -L ${OPTIONS} 
+
+
+#ExecStartPre=/bin/touch /run/mkbackup-%i-systemd.lock
+#ExecStartPost=-/bin/rm /run/mkbackup-%i-systemd.lock
+#ExecStartPre=/bin/sh -c "!(/bin/systemctl is-active -q btrfs-balance@var-cache-btrfs_pool_SYSTEM.service)"
+#ExecStartPre=/bin/sh -c "!(/bin/systemctl is-active -q btrfs-balance@var-cache-backup.service)"
+#ExecStop=/bin/kill -s 15 $MAINPID 
+#ExecStopPost=-/bin/systemctl start update-backuplinks.target
+#PIDFile=/var/run/mkbackup_create_%i.pid
+
+
+[Install]
+WantedBy=timer-%i.target 
+
