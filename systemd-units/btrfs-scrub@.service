@@ -5,15 +5,18 @@ ConditionPathExists=!/run/btrfs-scrub-systemd.lock
 ConditionPathExists=!/run/mkbackup-systemd.lock
 ConditionACPower=true
 Conflicts=suspend.target shutdown.target
-Wants=status-email-root@%n.service
-Before=status-email-root@%n.service
+#Wants=status-email-root@%n.service
+#Before=status-email-root@%n.service
 OnFailure=status-email-root@%n.service
+#StopWhenUnneeded=true
 
 [Service]
 IOSchedulingClass=3
+CPUSchedulingPolicy=idle
 Nice=10
 ExecStartPre=/bin/touch /run/btrfs-scrub-systemd.lock
 ExecStart=/bin/btrfs scrub start -Bd %f
-ExecStop=-/bin/btrfs scrub cancel %f
-ExecStopPost=/bin/rm /run/btrfs-scrub-systemd.lock
-ExecReload=/bin/btrfs scrub resume %f
+ExecStop=/bin/sh -c '/bin/ps h -o command -p $MAINPID && /bin/btrfs scrub cancel %f'
+#ExecStop=-/bin/btrfs scrub cancel %f
+ExecStopPost=-/bin/rm /run/btrfs-scrub-systemd.lock
+#ExecReload=/bin/btrfs scrub resume %f

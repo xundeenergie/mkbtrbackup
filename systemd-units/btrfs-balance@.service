@@ -2,13 +2,18 @@
 Description=Balance btrfs-filesystem %f
 ConditionPathExists=!/run/btrfs-balance-systemd.lock
 ConditionPathExists=!/run/mkbackup-systemd.lock
+ConditionACPower=true
 Conflicts=suspend.target shutdown.target
-Wants=status-email-root@%n.service
-Before=status-email-root@%n.service
+#Wants=status-email-root@%n.service
+#Before=status-email-root@%n.service
 OnFailure=status-email-root@%n.service
+#StopWhenUnneeded=true
 
 [Service]
+Type=oneshot
+Nice=10
 IOSchedulingClass=3
+CPUSchedulingPolicy=idle
 ExecStartPre=/bin/touch /run/btrfs-balance-systemd.lock
 ExecStart=/bin/btrfs balance start -dusage=55 -v %f
 #ExecStop=/bin/btrfs balance cancel %f
