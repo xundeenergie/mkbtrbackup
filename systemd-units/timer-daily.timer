@@ -1,0 +1,10 @@
+[Unit]
+Description=Daily Timer
+
+[Timer]
+OnCalendar=*-*-* 10:00:00
+Persistent=true
+Unit=timer-daily.target
+
+[Install]
+WantedBy=basic.target

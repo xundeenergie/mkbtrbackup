@@ -1,0 +1,10 @@
+[Unit]
+Description=Weekly Timer
+
+[Timer]
+OnCalendar=Mon *-*-* 20:00:00
+Persistent=true
+Unit=timer-weekly.target
+
+[Install]
+WantedBy=basic.target

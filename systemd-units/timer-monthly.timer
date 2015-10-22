@@ -1,0 +1,10 @@
+[Unit]
+Description=Monthly Timer
+
+[Timer]
+OnCalendar=*-*-01 12:30:00
+Persistent=true
+Unit=timer-monthly.target
+
+[Install]
+WantedBy=basic.target
