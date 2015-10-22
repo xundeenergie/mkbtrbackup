@@ -1,0 +1,1470 @@
+#!/bin/bash
+#
+
+# mkbtrbackup - Script to make recursive backups with btrfs
+# Version: 0.8.2
+# Source: <http://linux.xundeenergie.at/doku.php?id=mkbtrbackup>
+
+# Author: Jakobus Schürz <jakob@xundeenergie.at>
+# Licence: GPLv2 or later
+# No warranity for data-loss or other damage. Use on own risk!
+# This is beta-software, unreviewd and untested!!
+# Please send bugreports or wishlists to my adress
+# If you are happy, make me happy and buy a healthy energydrink on http://xundeenergie.vemmaeurope.com
+# Hope you'll enjoy this software!
+
+LOGGING=journald
+
+. /usr/local/bin/functions-jakob
+
+CMDL="$0 $@"
+SHLOCK=/usr/local/bin/shlock
+AWK=$(which gawk)
+
+# You can define some Parts in this config-file, which is also shipped with this package. Just study the comments there, make your changes
+# and uncomment this line 
+#CONFFILE="/etc/$(basename $0).conf"
+LOGFILEDEFAULT="/var/log/$(basename $0).log"
+
+# SNPTMNTDEFAULT and BKPMNTDEFAULT must be mountpoints of btrfs. 
+# SNPMNTDEFAULT is the mountpoint, where the btrfs-partition (not a subvolume, the partition itself!!!) is mounted. (Option »-S«)
+# BKPMNTDEFAULT is the mountpoint from the external HD, or maybe sshfs- or NFS-mounts, where the backup is stored. (Option »-B«)
+# SNPSTORE[DEFAULT] is a directory relative to SNPMNT[DEFAULT], where all the snapshots of your system are stored. (Option »-s«)
+# BKPSTORE[DEFAULT] is a directory relative to BKPMNT[DEFAULT], where the backups of your snapshots are stored. (Option »-b«)
+# If (BKP|SNP)STORE[DEFAULT] is empty, the store is directly in the mountpoint!
+SNPMNTDEFAULT=/var/cache/btrfs_pool_SYSTEM
+BKPMNTDEFAULT=/var/cache/backup
+SNPSTOREDEFAULT=
+BKPSTOREDEFAULT=$(/bin/hostname)
+#BKPSTOREDEFAULT=aldebaran
+
+# Backupserver IP-Adress or hostname, if resolvable
+BKPSRVDEFAULT=localhost
+#BKPSRVDEFAULT=tinakisti
+
+# The Path to the btrfs-binary
+case $(which btrfs) in
+   /bin/btrfs)
+      BTRFS="/usr/bin/ionice -c3 /bin/btrfs"
+      ;;
+   /sbin/btrfs)
+      BTRFS="/usr/bin/ionice -c3 /sbin/btrfs"
+      ;;
+   *)
+      exit 15
+      ;;
+esac
+
+
+# If CREATE=true, a recursiv snapshot is taken
+CREATE=false
+
+# If RO=true, this created snapshot is made read-only
+RO=false
+
+# If XFER=true, the given snapshot is transferred to the backupstore
+# If SYNC=true on create, the actual snapshot is directly transferred to the backupstore
+XFER=false
+SYNC=false
+
+# If DELETE=true, the given Snapshot is deletet. If no snapshot is given, nothing happens
+DELETE=false
+
+# If INIT=true, the Remote Backup is initiated. One copy of your subvolume is transferred and one is stored local, so next backup-run
+# only the difference between the last and the current state is transferred (takes a long time, if a big subvolume is initiated first)
+# Set »-i« on the commandline to activate it.
+# If init is not activated, a error results, if the remote backup doesn't exist!
+INIT=false
+
+# If checkonly is true, check only the comparable subvolumes in SNP and BKP, which are usable as parent subvolumes for transfer. Puts out only a list
+checkonly=false
+
+# If SETPROPERT=true a Snapshot must be given. (-s <Snapshotname>) and the whole Snapshot (including Subvolumes in it),
+# gets the property ro or rw (»-p rw« or »-p ro«
+SETPROPERT=false
+
+# If DRY=true, a dry run on delete is run. Nothing is deletet, just to see, what gets deleted
+#DRY=
+
+# Create a Timestamp for one Snapshot
+DATE=`date +%Y%m%d-%H%M%S`
+
+# Defaults for hourly, daily, weekly and monthly snapshots to be hold in stack. (only the highest index counts, not the count of snapshots!!)
+apt_upgrade=5
+afterboot=5
+dmin=6
+hourly=24
+daily=7
+weekly=4
+monthly=12
+manually=10
+
+# If MAX=true, a snapshot highter than the defaults above is deleted. 
+MAX=true
+
+# If SYMLINK=true, a symbolic link to the current snapshot  is created
+# If SYMEXTENT=CURRENT, the symlink is created with *.CURRENT. Can be modified with Option -T
+SYMLINK=false
+SYMEXTENT=CURRENT
+
+# Be quiet
+#quiet=true
+
+# Only if the option --interval is set to hourly, daily, monthly, the ROT is set to 1. Never do this manually
+# If TERMINATE=true, rotated snapshots older than allowed are really deleted.
+ROTATE=false
+TERMINATE=false 
+
+# Create only a List
+LIST=false
+
+# If true, the list is reverse sorted
+REVERSE=false
+
+# If true, Source and Destinations are tested if existing. If not, a "nonexistant" is given back
+VERIFY=false
+
+# Set btrfs property on given Snapshot reverse
+SETPROP=false
+
+# If FSTAB=true, modify the fstab, that / is the right subvolume to mount
+FSTAB=false
+
+# If BOOTABLE=true, this skript is called with setboot on creat
+BOOTABLE=false
+
+#typeset -i err=0 
+err=0
+
+# bash shortcut for `basename $0`
+PROG=${0##*/}
+lock=/var/run/${PROG}
+
+# Send Mail in Case of error
+EMAIL="root@localhost"
+
+# Cleanup-Settings
+CLEANUP=false
+CLEANUPLIST=cleanup-snapshots
+
+usage() { 
+ cat <<EOF
+Usage: $0
+
+   $PROG create [-x][ -L][ -m]    OPTIONS [<Subvolname>] [<Subvolname>] ..." 
+   $PROG transfer [-C]            OPTIONS  <Subvolname>  [<Subvolname>] ...
+   $PROG delete[ SRC][ SNP][ BKP] OPTIONS  <Subvolname>  [<Subvolname>] ..." 
+   $PROG setprop <ro|rw>          OPTIONS  <Subvolname>  [<Subvolname>] ..." 
+   $PROG rotate --interval (dmin|hourly|daily|monthly)[ -m[0-9]] <Subvolname>  [<Subvolname>] ...
+   $PROG setboot <Subvolname>  [<Subvolname>] ...
+   $PROG list[ SRC][ SNP][ BKP][ STR][ BTR] OPTIONS <Subvolname>  [<Subvolname>] ...
+    all subvolumes from specific Snapshot
+      SRC = Sourcestore 
+      SNP = Snapstore
+      BKP = Backupstore
+    Listing of all Snapshots without subvolumes
+      STR = Source
+      BTR = Backup
+   $PROG help|-h|--help" 
+
+
+
+OPTIONS:
+
+  -c <Config-File>          /Path/to/Configuration/File. If no Config-File is given, /etc/$(basename $0).conf is used
+  -S <Source Mountpoint>    This is a Mountpoint, where your root-pool of the btrfs-filesystem is mounted (SNPMNT= in config-file)
+  -s <SNPSTORE>             Relative path from <Source Mountpoint> to where the local snapshots are stored (3. arument in line backup in configfile)" 
+  -D <SERVER>               IP-Adress or servername if resolvable of the backupserver (Defaults to "localhost"
+  -B <Backup Mountpoint>    Here your external HD gets mounted (BKPMNT= in config-file)
+  -b <BKPSTORE>             Relative path from <Backup Mountpoint> to where the remote snapshots are stored (4. argument in line backup in configfile)
+  -i                        If the snapshot on \$SNAPDEST does not exist, create an inital snapshot - otherwise -r fails
+  -x                        On create, transfer the new snapshot directly to the backupstore: $BKPSTORE
+  -e <exclude Pattern>      a quoted String. Is a pattern (regexp like in grep) which describes which subvolumes should not get snapshotted.
+                            Can be used more then once (exclude= in config-file)
+  -t|T <TAG>                Tag is a string, which is put after the timestamp. For example your subvolume to get snapshotted is '@TEST'.
+                            without this Option, the snapshotname is '@TEST.${DATE}'
+                            with -t the snapshotname is '@TEST.${DATE}.TAG'
+                            with -T the snapshotname is '@TEST.TAG'
+  -H <HTAG>                  Create the symlink whith @TEST.TAG.HTAG
+  -L                        Make Symlinks *.CURRENT and *.LAST to the current and last snapshot
+  -M                        Modify /etc/fstab of the given snapshot(s) from subvolume-name to subvolume-id." 
+                            The original entry MUST be »subvol=@TEST«, no Timestamp or other tag-stuff!!
+  -C                        Check only the parent-uuids of subvolumes on SNP and BKP, which are usable as parent for incremental backup. Gives a List
+  --dry-run                 only show you, what will happens without this option
+
+  --interval (dmin|hourly|daily|weekly|monthly|manually)   a snapshot is created with one of this tags (similar to option -t).
+                                             For example '@TEST.${DATE}.hourly.0'. An existing snapshot '*.hourly.0' is rotated to '*.hourly1'
+                                             If the Option -s is set, also remote snapshots get rotated
+  -m <[1-9][0-9]*>          With -m set the maximum of the interval to a number. All snapshots higher than that are deleted on rotation
+                            (Defaults for interval dmin=$dmin; hourly=$hourly; daily=$daily; weekly=$weekly; monthly=$monthly)
+  -m 0                      This deactivates deleting.
+  -v[vv]                    Be verbous
+  -q                        Be totally quiet. Call exitcode and see logfile, what happend
+  -l <LOGFILE>              Absolute path to logfile. Defaults to /var/log/$(basename $0).log
+  -n <email@adress>         Notification to email-address in case of an error
+  --cleanup                 Cleanup, delete snapshots from older interrupted runs automatically. List is stored in $SNMPMNT/$CLEANUPLIST
+
+SUBVOLUMES:
+
+  <Subvolname>	This is the Name of a Subvolume, you want to backup recursively with all Subvolumes unter it.
+                  This can be a Name from the current directory, relative to the current directory or an absolut path from /
+                  " 
+EOF
+exit $1; 
+}
+
+
+
+#function die () { 
+#   msg=${1:-} # don't loop on ERR  
+#   trap '' ERR
+#
+#   rm $lock
+#   
+#   echo "$msg" >&2 
+#   echo >&2
+#   
+#   # This is a fancy shell core dumper 
+#   if echo $msg | grep -q 'Error line .* with status'; then 
+#      line=`echo $msg | sed 's/.*Error line \(.*\) with status.*/\1/'`
+#      echo " DIE: Code dump:" >&2 
+#      nl -ba $0 | grep -3 "\b$line\b" >&2 
+#
+##      cat <<EOF
+##      $0 DIE: Code dump:
+##      nl -ba $0 | grep -3 "\b$line\b"
+##EOF|mail -s "$0 ERROR" $EMAIL
+#   fi
+#   
+#   exit 1 
+#}
+
+# Handle SIGTERM (kill -s 15)
+sighandler_TERM() {
+   printf "Got signal SIGTERM\n"
+   printf "add following snapshots to delete-list:"
+   printf "${SNPDESTS[$loop]}/${SNPVOLS[$loop]} \n" | tee -a "${SNPMNT}/${CLEANUPLIST}"
+   [ -n "${BKPDESTS[$loop]}" ] && printf "${BKPDESTS[$loop]}/${BKPVOLS[$loop]} \n" | tee -a "${SNPMNT}/${CLEANUPLIST}"
+   #$0 delete BKP SNP "${SNPVOLS[$loop]}"
+   rm $lock
+   echo "Bye!"
+   exit 0;
+}
+
+# Handle SIGKILL (kill -s 9)
+sighandler_KILL() {
+   printf "Got signal SIGKILL\n"
+   printf "delete ${SNPVOLS[$loop]} on next run \n"
+   printf "${SNPVOLS[$loop]} \n" | tee -a "${SNPMNT}/${CLEANUPLIST}"
+   #$0 delete BKP SNP "${SNPVOLS[$loop]}"
+   rm $lock
+   echo "Bye!"
+   exit 0;
+}
+
+# Handle SIGINT (Crtl+C)
+sighandler_INT() {
+   printf "Got signal SIGINT\n"
+   if tty -s; 
+   then 
+      echo interactive
+      printf "Should I delete not finished snapshots ${SNPSUBS[$loop]} und ${BKPSUBS[$loop]} (y/n) : "
+      read
+      if [[ $REPLY = "y" || $REPLY = "j" ]]
+      then
+         $0 delete BKP SNP "${SNPVOLS[$loop]}"
+         rm $lock
+         echo "Bye!"
+         exit 0;
+      fi
+   else
+      echo non-interactive
+      $0 delete BKP SNP "${SNPVOLS[$loop]}"
+      rm $lock
+      echo "Bye!"
+      exit 0;
+   fi 
+}
+
+# Signale SIGTERM abfangen
+trap 'sighandler_TERM' 15
+
+# Signale SIGKILL abfangen
+trap 'sighandler_KILL' 9
+
+# Signale SIGINT abfangen "Interrupt from Keyboard ctrl+c"
+trap 'sighandler_INT' 2
+
+
+
+
+case $1 in
+	create)
+		CREATE=true
+		STORE=(SRC SNP)
+                lock="${lock}_${1}"
+		shift
+		;;
+	delete)
+		DELETE=true
+		VERIFY=true
+                lock="${lock}_${1}"
+		shift
+		for((i=0;i<3;i++)); do
+			case $1 in
+				SRC|SNP|BKP) 
+					STORE[$s]=$1
+					s=$((s + 1))
+					shift
+					;; 
+			esac
+		done
+		[ -z "$STORE" ] && STORE=SRC
+		;;
+	setprop)
+		SETPROPERT=true
+                lock="${lock}_${1}"
+		shift
+		case $1 in
+			ro)PROP="ro"; shift;;
+			rw)PROP="rw"; shift;;
+			*)usage;;
+		esac
+		;;
+	rotate)
+		ROTATE=true
+                lock="${lock}_${1}"
+		shift
+		for((i=0;i<2;i++)); do
+			case $1 in
+				SNP|BKP) 
+					STORE[$s]=$1
+					s=$((s + 1))
+					shift
+					;; 
+			esac
+		done
+		[ -z "$STORE" ] && STORE=SRC
+		;;
+	transfer)
+		XFER=true
+		STORE=(SNP BKP)
+                lock="${lock}_${1}"
+		shift
+		;;
+	list)
+		s=0
+		LIST=true
+                lock="${lock}_${1}"
+		shift
+		for((i=0;i<5;i++)); do
+			case $1 in
+				SRC|SNP|BKP|STR|BTR) 
+					STORE[$s]=$1
+					s=$((s + 1))
+					shift
+					;; 
+			esac
+		done
+		case $1 in
+			--reverse) 
+				REVERSE=true; shift 
+				;;
+		esac
+		case $1 in
+			--verify) 
+				VERIFY=true; shift 
+				;;
+		esac
+		unset s
+		[ -z "$STORE" ] && STORE=SRC
+		;;
+	setboot)
+		FSTAB=true
+                lock="${lock}_${1}"
+		shift
+		;;
+	-h|help|--help)
+		usage 0
+		;;
+	*)
+		usage 1
+		;;
+esac
+
+
+set -- $(getopt -u -o :B:b:c:CD:e:hH:iLl:Mm:qrS:s:T:t:vx  --long dry-run,interval:,cleanup -- "$@" )
+
+#typeset -i e=0
+e=0
+
+while [ $# -gt 0 ]
+do
+    case "$1" in
+	-B)
+	    BKPMNT="$2"
+	    shift; shift
+	    ;;
+	-b)
+	    BKPSTORE="$2"
+	    BKPSTORES=("$2")
+	    shift; shift
+	    ;;
+        -c)
+            CONFFILE="${2}"
+	    shift; shift
+            ;;
+        -C)
+            checkonly=true
+	    shift; 
+            ;;
+        --cleanup)
+	    CLEANUP=true
+	    shift;
+	    ;;
+        -D)
+            BKPSRV="${2}"
+	    shift; shift
+            ;;
+	--dry-run)
+	    export DRY=true
+	    XRUN="/usr/bin/printf %s\n "
+	    shift
+	    ;;
+	-e)
+	    EXCLUDES[$e]="${2}"
+	    e=$((e + 1))
+	    shift; shift
+	    ;;
+	-h)
+	    usage 0
+	    ;;
+	-H)
+	    SYMEXTENT="$2"
+	    shift; shift
+	    ;;
+ 	-i)
+	    INIT=true
+	    shift
+	    ;;
+	--interval)
+	    case $2 in
+		dmin|hourly|daily|weekly|monthly)
+			#TAG="${2}_0"
+			TAG="${2}"
+			INTERVAL=$2
+                	lock="${lock}_${2}"
+			shift; shift
+			;;
+		apt_upgrade)
+			TAG="${2}"
+			INTERVAL=$2
+                	lock="${lock}_${2}"
+	    		SYMEXTENT="APT_UPGRADE"
+			shift; shift
+			;;
+		afterboot)
+			#TAG="${2}_0"
+			TAG="${2}"
+			INTERVAL=$2
+                	lock="${lock}_${2}"
+	    		SYMEXTENT="LASTBOOT"
+			shift; shift
+			;;
+		manually)
+			#TAG="${2}_0"
+			TAG="${2}"
+			INTERVAL=$2
+                	lock="${lock}_${2}"
+	    		SYMEXTENT="MAN"
+			shift; shift
+			;;
+		*)
+			usage
+			;;
+		esac
+	    ;;
+	-l)
+	    LOGFILE="$2"
+	    shift; shift
+	    ;;
+	-L)
+	    SYMLINK=true
+	    shift; 
+	    ;;
+	-m)
+	    shift
+	    case $1 in
+		[0-9]|[0-9][0-9]|[0-9][0-9][0-9])
+		       MAX=$1
+            	       shift
+		       ;;
+		  *)
+		       usage 1
+		       ;;
+            esac
+            ;;  
+	-M)
+	    BOOTABLE=true
+	    shift
+	    ;;
+	-n)
+	    EMAIL="$2"
+	    shift; shift
+	    ;;
+	-q)
+	    export quiet=true
+	    shift
+	    ;;
+	-r)
+	    RO=true
+	    shift
+	    ;;
+	-S)
+	    SNPMNT="$2"
+	    shift; shift
+	    ;;
+	-s)
+	    SNPSTORE="$2"
+	    shift; shift
+	    ;;
+	-t)
+	    TAG="$2"
+	    shift; shift
+	    ;;
+	-T)
+	    EXTENT="$2"
+	    shift; shift
+	    ;;
+	-v)
+	    export quiet=false
+	    vlevel=$((vlevel + 1))
+	    shift
+	    ;;
+	-x)
+	    SYNC=true
+	    shift
+	    ;;
+	--)
+	    shift
+	    SRCVOLS=("$@")
+	    break
+	    ;;
+        *)
+            usage 1
+            ;;
+    esac
+done
+
+unset e
+
+lock=${lock}.pid
+
+# shlock (from inn) does the right thing and grabs a lock for a dead process
+# (it checks the PID in the lock file and if it's not there, it
+# updates the PID with the value given to -p)
+if ! $SHLOCK -p $$ -f $lock; then
+    echo "$lock held for $PROG, quitting" >&2
+    exit
+fi
+
+# Trap errors for logging before we die (so that they can be picked up # by the log checker) 
+trap 'die "Error line $LINENO with status $?"' ERR
+
+# If not set AND a Configfile is given, set this variables to the values of the configfile
+if [ -n "$CONFFILE" ] ;then
+   [ -z ${SNPMNT+x} ]     && SNPMNT="`awk -F "=" '$1 ~ /^SNPMNT/{gsub(/"/,"",$0);print $2}' "$CONFFILE"`"
+   [ -z ${BKPMNT+x} ]     && BKPMNT="`awk -F "=" '$1 ~ /^BKPMNT/{gsub(/"/,"",$0);print $2}' "$CONFFILE"`"
+#   [ -z ${SRCVOLS+x} ]    && SRCVOLS=("`awk -F "\t" 'BEGIN{ORS="\t"} $1 ~ /^backup/{gsub(/"/,"",$0);print $2}' "$CONFFILE"`")
+   [ -z ${SNPSTORES+x} ]  && SNPSTORES=("`awk -F "\t" 'BEGIN{ORS="\t"} $1 ~ /^backup/{gsub(/"/,"",$0);print $3}' "$CONFFILE"`")
+   [ -z ${BKPSTORES+x} ]  && BKPSTORES=("`awk -F "\t" 'BEGIN{ORS="\t"} $1 ~ /^backup/{gsub(/"/,"",$0);print $4}' "$CONFFILE"`")
+   [ -z ${BKPSRV+x} ]     && BKPSRV=("`awk -F "\t" 'BEGIN{ORS="\t"} $1 ~ /^backup/{gsub(/"/,"",$0);print $5}' "$CONFFILE"`")
+   [ -z ${LOGFILE+x} ]    && LOGFILE="`awk -F "=" '$1 ~ /^LOGFILE/{gsub(/"/,"",$0);print $2}' "$CONFFILE"`"
+   [ -z ${TAG+x} ]        && TAG="`awk -F "=" '$1 ~ /^TAG/{gsub(/"/,"",$0);print $2}' "$CONFFILE"`"
+   [ -z ${EXTENT+x} ]     && EXTENT="`awk -F "=" '$1 ~ /^EXTENT/{gsub(/"/,"",$0);print $2}' "$CONFFILE"`"
+fi
+
+# If not read from config-file unset Variables for setting it with defaults
+
+[ -z "$SNPMNT" ]     && unset SNPMNT
+[ -z "$BKPMNT" ]     && unset BKPMNT
+[ -z "$BKPSRV" ]     && unset BKPSRV
+[ -z "$SNPSTORES" ]     && unset SNPSTORES
+[ -z "$BKPSTORES" ]     && unset BKPSTORES
+[ -z "$SRCVOLS" ]     && unset SRCVOLS
+[ -z "$LOGFILE" ]    && unset LOGFILE
+[ -z "$TAG" ]        && unset TAG
+[ -z "$EXTENT" ]     && unset EXTENT
+
+# If no values from commandline nor from configfile, set this variables to default-values from the skript (just adapt it to your uses)
+[ -z ${SNPMNT+x} ]    && SNPMNT="$SNPMNTDEFAULT"
+[ -z ${BKPMNT+x} ]    && BKPMNT="$BKPMNTDEFAULT"
+[ -z ${BKPSRV+x} ]    && BKPSRV="$BKPSRVDEFAULT"
+[ -z ${SNPSTORES+x} ]  && SNPSTORES=("$SNPSTOREDEFAULT")
+[ -z ${BKPSTORES+x} ]  && BKPSTORES=("$BKPSTOREDEFAULT")
+[ -z ${LOGFILE+x} ]   && LOGFILE="$LOGFILEDEFAULT"
+[ -z ${EXTENT+x}  ]   && EXTENT="${DATE}"
+#[ -z ${TAG+x} ]      || EXTENT="${DATE}.${TAG}"
+[ -z ${TAG+x} ]      || EXTENT="${EXTENT}.${TAG}"
+[ -z ${DRY+x} ]    && DRY=false
+[ -z ${quiet+x} ]    && quiet=false
+[ -z ${vlevel+x} ]    && vlevel=0
+
+case "$BKPSRV" in
+   localhost)
+      export SSH=""
+      ;;
+   *)
+      export SSH="/usr/bin/ssh $BKPSRV"
+      ;;
+esac
+
+#[ -z ${BKPSRV+x} ]    || export SSH="/usr/bin/ssh $BKPSRV"
+
+#echo "BKPSTORE:   $BKPSTORE"
+#echo "BKPSTORES:   $BKPSTORES"
+
+function _checkmounts () {
+   # Test if SNPMNT and BKPMNT are really and different btrfs
+#   [ $(/usr/bin/awk 'BEGIN{t=0} $3 ~ "btrfs" && $2 ~  "^" mnt "$"  {t=1;print "true"}END{if(t == 0)print "false"}' mnt="$SNPMNT" /proc/self/mounts) != true ] \
+#   	&& { Debug 1 "$SNPMNT is not mounted or a btrfs-Filesystem. Job(s) canceled!!"; Debug 1 "[FAILURE]";  return 1; } || { bkp=true; Debug 3 "SNPMNT ok!"; }
+#   [[ $( $SSH /bin/findmnt -ln "/var/cache/backup" |grep -q btrfs ) ]] \
+#   	&& { Debug 1 "$BKPMNT is not mounted or a btrfs-Filesystem. Job(s) canceled!!"; Debug 1 "[FAILURE]"; bkp=false; return 2; } && { bkp=true; Debug 3 "BKPMNT ok!"; }
+   # Test if SNPMNT and BTRMNT are really different btrfs-filesystems. If not, exit
+
+   UUIDSNP=( $( $SSH /bin/findmnt -ln "$SNPMNT" |$AWK '$3 ~ /btrfs/ {print $2}'|while read dev; do /sbin/blkid "$dev" | sed -n 's/.*UUID=\"\([^\"]*\)\".*/\1/p';done ))
+   UUIDBKP=( $( $SSH /bin/findmnt -ln "$BKPMNT" |$AWK '$3 ~ /btrfs/ {print $2}'|while read dev; do /sbin/blkid "$dev" | sed -n 's/.*UUID=\"\([^\"]*\)\".*/\1/p';done ))
+
+   UUID=($UUIDSNP $UUIDBKP)
+
+   Debug 1 "SSH: $SSH"
+   Debug 1 "UUIDSNP: ${UUIDSNP[@]}"
+   Debug 1 "UUIDBKP: ${UUIDBKP[@]}"
+   Debug 1 "UUID: ${UUID[@]}"
+
+#   if [ ${#UUID[@]} -le 1 ] ;then
+#      echo "Please check your SNPMNT ($SNPMNT - uuid=${UUIDSNP[@]})"
+#      echo "and BKPMNT ($BKPMNT - uuid=${UUIDBKP[@]})."
+#      echo  "Something seems to be wrong or broken. Are both mounted? If one uuid is empty, filesystem is not mounted"
+#      echo "[FAILURE]"
+#      return 3
+#   fi
+
+   if [ -z ${UUIDSNP} ] ; then
+      Debug "$SNPMNT not mounted"
+      Debug "[FAILURE]"
+      return 4
+   fi
+
+   if [ -z ${UUIDBKP} ] ; then
+      Debug 1 "$BKPMNT not mounted"
+      Debug 1 "[no transfer]"
+      bkp=false
+      return 5
+   else
+      bkp=true
+   fi
+
+
+   #if [ "${UUID[0]}" = "${UUID[1]}" ] ;then
+   if [ "$UUIDSNP" = "$UUIDBKP" ] ; then
+      Debug 1 "SNPMNT ($SNPMNT) and BKPMNT ($BKPMNT) are the same btrfs"
+      Debug 1 "[FAILURE]"
+      return 6
+   fi
+   return 
+}
+
+# Is there a MAX given, rotate deletes all snapshots with this interval have an index higher than MAX
+# This means: if MAX=7 and INTERVAL=daily, a snapshot @TEST.$DATE.daily_8 is deleted.
+# Its the index and not the number of snapshots, which are hold or deleted
+
+case $MAX in
+   true)
+         case $INTERVAL in
+            manually)	MAX=$manually;;
+            apt_upgrade)	MAX=$apt_upgrade;;
+            afterboot)	MAX=$afterboot;;
+            dmin)   	MAX=$dmin;;
+            hourly)	MAX=$hourly;;
+            daily)	MAX=$daily;;
+            weekly)	MAX=$weekly;;
+            monthly)	MAX=$monthly;;
+         esac
+         ;;
+   [0-9]|[0-9][0-9]|[0-9][0-9][0-9])
+         case $INTERVAL in
+            manually)	manually=$MAX;;
+            apt_upgrade)	apt_upgrade=$MAX;;
+            afterboot)	afterboot=$MAX;;
+            dmin)	dmin=$MAX;;
+            hourly)	hourly=$MAX;;
+            daily)	daily=$MAX;;
+            weekly)	weekly=$MAX;;
+            monthly)	monthly=$MAX;;
+         esac
+         ;;
+   *)
+         usage
+         ;;
+esac
+
+#TODO: Read the max for intervals from config-file
+
+#echo "max=$max"
+#echo "interval=$interval"
+#echo "hourly=$hourly"
+#echo "daily=$daily"
+#echo "weekly=$weekly"
+#echo "monthly=$monthly"
+
+# The script is called by itself. verbosity-level (vlevel) is exported to this instances. All instances run at the same vlevel
+export vlevel
+
+# Only when create new snapshots, the given (SRC) filenames have to become a extension for a uniq filename of the top snapshot/subvolume.
+# So the timestamp is a good idea. (Set in the begin of the skript). In config-file or commandline-option, no dot is allowed.
+# To distinguish filename, timestamp an tag, a dot is used. Added here. 
+
+if $CREATE ; then
+   [ -n "$EXTENT" ] && EXTENT=".$EXTENT"
+   [ -n "$TAG" ]    && TAG=".$TAG"
+else
+   EXTENT=""
+   TAG=""
+fi
+
+# This function controls the output and debuglevel. It is used instead of "echo" in the skript.
+# You can set vlevels (vlevel=0 is default) and some minimal output is given. 
+# You can also give -q (quiet), so regulary all messages are gone on terminal (they go to logfile).
+# The skript returns only an exit-code. exit 0 is success, exit > 0, there was some failure.
+#function Debug () {
+#    case $1 in
+#	[0-9]*) V=$1;shift;;
+#	*) V=0;;
+#    esac
+#
+#    if $quiet; then
+#	#[ $V -lt 1 ] && echo "$*" >> ${LOGFILE}
+#	[ $V -lt 1 ] && echo "$*" |tee -a ${LOGFILE}|systemd-cat -t $(/usr/bin/basename "$0")
+#	return 0
+#    else
+#	if [ $V -le $vlevel ]; then
+#          #[ $V -eq 0 ] && echo "[II]($$:$loop)	$*" >> "$LOGFILE"
+#          [ $V -eq 0 ] && echo "[II]($$:$loop)	$*" |tee -a ${LOGFILE}|systemd-cat -t $(/usr/bin/basename "$0")
+#          echo "[II]($$:$loop)	$*"
+#          return 0
+#        fi
+#    fi
+#}
+
+# Decides to run a command, or to put out the command itself to the terminal (dry-run)
+function Run () {
+    if $DRY ; then
+        echo "[XX]  $*"
+        return 0
+    fi
+
+    if $quiet ; then
+        eval "$@" >> ${LOGFILE} 2>&1 ||err=$((err + 1)) 
+	return $?
+    else
+        [ $vlevel -ge 2 ] && echo "[XX] $@" |tee -a ${LOGFILE}
+        if [ $vlevel -ge 1 ] ;then
+           eval "$@" 2>&1 |tee -a ${LOGFILE} || { err=$((err + 1)); }
+        else
+           eval "$@" >> ${LOGFILE} 2>&1 || { err=$((err + 1)); }
+        fi
+	return $?
+    fi
+}
+
+function Log () {
+   echo "$(/bin/date +"%b %d %_H:%M:%S") $*" >> ${LOGFILE}
+}
+
+function transfercheck () {
+
+   SNP=$1
+   BKP=$2
+   TRANS=$3
+   err=0
+
+   PUUID=$($BTRFS sub show "$TRANS" 2>/dev/null|grep -i "Parent uuid:"|cut -c 17-)
+   UUID=$($BTRFS sub show "$TRANS" 2>/dev/null|tr -s "\t"|awk -F "\t" '$2 ~ /^uuid|^UUID/{print $3}')
+   GEN=$($BTRFS sub show "$TRANS" 2>/dev/null|tr -s "\t"|awk -F "\t" '$2 ~ /^Generation/{print $3}')
+   [ -z ${PUUID} ] && { err=1; unset PUUID; }
+   
+#echo PUUID: $PUUID
+#echo UUID: $UUID
+#echo GEN: $GEN
+   # Prints received_uuid uuid and path
+#   $BTRFS subvol list -q -u -o "${SNP}"
+   $BTRFS subvol list -q -u -o "${SNP}" | awk '$9 == puuid && $11 != uuid && $4 < gen{print $4" "$11" "$13}' puuid=$PUUID uuid=$UUID gen=$GEN |\
+   while read gen uuid p 
+   do
+#     # checks if the ruuid is the same as the uuid of the local subvol and prints the local path and the foreign path
+     if [ -z "${PUUID}" ]
+     then
+       :
+     else
+       #Debug B xuuid: $uuid
+       #Debug B puuid: $PUUID
+       $BTRFS subvol list -o -R "${BKP}" |awk '$9 == uuid {print snp"/"p}' uuid=$uuid p=$p puuid=$PUUID gen=$bgen snp=$SNP
+     fi
+   done 
+}
+
+Log "####################################################################################################"
+Log "## New Run( `date +%Y.%m.%d-%H:%M:%S`): $CMDL "
+Log "####################################################################################################"
+Debug 3 "####################################################################################################"
+Debug 3 "## New Run( `date +%Y.%m.%d-%H:%M:%S`): $CMDL "
+Debug 3 "####################################################################################################"
+Debug 3 "++++++++++++ BEGIN Intro +++++++++++++++++++++++++++++"
+Debug 5 "CREATE:     $CREATE"
+Debug 5 "ROTATE:     $ROTATE"
+Debug 5 "DELETE:     $DELETE"
+Debug 5 "LIST:       $LIST"
+Debug 5 "STORE:      ${STORE[*]}"
+Debug 5 "REVERSE:    $REVERSE"
+Debug 5 "SETPROPERT: $SETPROPERT"
+Debug 5 "XFER:       $XFER"
+Debug 5 "SYMLINK:    $SYMLINK"
+Debug 5 "@:          $@"
+Debug 5 "CONFIG:     $CONFFILE"
+Debug 5 "SRCVOLS:    ${SRCVOLS[*]}"
+Debug 4 "lock:       $lock"
+Debug 5 "---------------------------------"
+
+# Initialize some counters as integer and set them to 0
+#typeset -i i=0
+#typeset -i j=0
+#typeset -i k=0
+#typeset -i n=0
+i=0
+j=0
+
+# If BKP or BTR-Store is used, check for the mounts (function from above)
+[ $SYNC = true ] && bkp=true || bkp=false
+Debug 2 "STORE: ${STORE[@]}"
+#_checkmounts || { err=$?; Debug "Mountpoints or filesystem on mountpoints are not correct. Exiting!"; exit $err; }
+_checkmounts||err=$?
+
+Debug 3 ERROR: $err
+case $err in
+	1) exit 1;;
+	2) Debug 1 Continue without transfer; bkp=false;;
+	3) exit 3;;
+	4) Debug 1 Continue without transfer; bkp=false;;
+	5) Debug 1 Continue without transfer; bkp=false;;
+	6) exit 6;;
+esac
+Debug 5 "SYNC: $SYNC - bkp: $bkp"
+
+
+# The given File(s) from commandline or
+# Test if given names in the path ($PWD) or from config-file in the path $SOURCE are existing an write them in an array $SRCVOLS)
+# If config-file is given, read the subvolumes to be backed up
+if [ -n "$CONFFILE" ] ;then
+   [ -z ${SRCVOLS+x} ]  && { SRCVOLS=( `awk -F "\t" 'BEGIN{ORS="\t"} $1 ~ /^backup/  {print $2}' srcmnt="$SNPMNT" "$CONFFILE"`); }
+   [ -z ${SOURCES+x} ]  && { SOURCES=( `awk -F "\t" 'BEGIN{ORS="\t "} $1 ~ /^backup/  {print srcmnt}' srcmnt="$SNPMNT" "$CONFFILE"`); }
+                             SNPSTORES=(`awk -F "\t" 'BEGIN{ORS="\t"} $1 ~ /^backup/  {print $3}' "$CONFFILE"`)
+                             BKPSTORES=(`awk -F "\t" 'BEGIN{ORS="\t"} $1 ~ /^backup/  {print $4}' "$CONFFILE"`)
+                             SYNCS=(`awk -F "\t" 'BEGIN{ORS="\t"} $1 ~ /^backup/  {if($4 ~ /none/ ){print "false"}else{print "true"}}' "$CONFFILE"`)
+   [ -z ${SNPDESTS+x} ] && { SNPDESTS=(`awk -F "\t" 'BEGIN{ORS="\t"} $1 ~ /^backup/  {print srcmnt"/"$3}' srcmnt="$SNPMNT" "$CONFFILE"|xargs readlink -f`); }
+   [ -z ${BKPDESTS+x} ] && { BKPDESTS=(`awk -F "\t" 'BEGIN{ORS="\t"} \
+	$1 ~ /^backup/ && $4 != "" {print rmtmnt"/"$4}' rmtmnt="$BKPMNT" "$CONFFILE"|xargs readlink -f`); }
+   [ -z ${EXCLUDES+x} ] && { EXCLUDES=(`awk -F "\t" '                $1 ~ /^exclude/ {print $2}' "$CONFFILE"`);}
+   # If working with a config-file, there are BKP-Points given. So you want to transfer this snapshots, directly, even if »-x« is NOT given
+   #SYNC=true
+Debug 5 "SYNCS:     ${SYNCS[@]}"
+else
+   # If no config is given - so if run from cmdline without the -c option, and no default-config is set,
+   # fill the first element in the array with the given values
+   for ((i=0; i < "${#SRCVOLS[@]}";i++)) ;do
+      if [ "${SRCVOLS[$i]:0:1}" = "/" ] ;then
+         SOURCES[$i]="$(dirname $(readlink -f ${SRCVOLS[$i]}) 2>/dev/null)"
+      else
+         SRCVOLS[$i]="$(readlink -f "$PWD/${SRCVOLS[$i]}" 2>/dev/null) "
+         SOURCES[$i]="$(dirname ${SRCVOLS[$i]} 2>/dev/null)"
+      fi
+      SRCVOLS[$i]="$(basename ${SRCVOLS[$i]})"
+      SNPSTORES[$i]="${SNPSTORE}"
+      SNPDESTS[$i]="$(readlink -f ${SNPMNT}/${SNPSTORES[$i]} 2>/dev/null)"
+      SYNCS[$i]=$SYNC
+
+      if [ $bkp = true ];then
+         BKPDESTS[$i]="$($SSH readlink -e ${BKPMNT}/${BKPSTORES[$i]} 2>/dev/null || { $SSH mkdir -p ${BKPMNT}/${BKPSTORES[$i]} 2>/dev/null && $SSH readlink -e ${BKPMNT}/${BKPSTORES[$i]} 2>/dev/null; } )"
+         #BKPDESTS[$i]="$(readlink -e ${BKPMNT}/${BKPSTORE} 2>/dev/null && { mkdir -p ${BKPMNT}/${BKPSTORE} 2>/dev/null; readlink -f ${BKPMNT}/${BKPSTORE} 2>/dev/null; } || readlink -f ${BKPMNT}/${BKPSTORE} 2>/dev/null)"
+         #BKPSTORES[$i]="${BKPSTORE}"
+      else 
+         BKPDESTS=()
+      fi
+      
+   done
+fi
+
+Debug 4 "BKPDESTS:  ${BKPDESTS[@]}"
+
+# If createing a snapshot is the wish, you have your source-snapshots given on cmdline (or config).
+# You need a list of all subvolumes in this snapshot. (SRCSUBVOLS)
+# Then you need a similar list of subvolumes in the snapshotdestination (is not existing now, will be created), and
+# a similar list of all subvolumes in the backup-destination on the remote HD. The last 2 lists have to be created from the first list.
+#
+# If you want to transfer or delete, or set the snapshot to read-only or read-write, you need a list of the really existing subvolumes there.
+
+if [ $CREATE = true ] ;then
+   for ((i=0; i < "${#SRCVOLS[@]}";i++)) ;do
+      Debug 1 "$(echo ${SRCVOLS[$i]}|sed -e 's/\(.*\)\.[^.][^.]*\.[^.][^.]*$/\1/')${EXTENT}"
+      #SNPVOLS[$i]="$( basename $(readlink -f "${SRCVOLS[$i]}${EXTENT}" ))"
+      LNKNAMS[$i]="$( basename $(readlink -f "$(echo ${SRCVOLS[$i]}|sed -e 's/\(.*\)\.[^.][^.]*\.[^.][^.]*$/\1/')" ))"
+      SNPVOLS[$i]="$( basename $(readlink -f "$(echo ${SRCVOLS[$i]}|sed -e 's/\(.*\)\.[^.][^.]*\.[^.][^.]*$/\1/')${EXTENT}" ))"
+      BKPVOLS[$i]="${SNPVOLS[$i]}"
+   done
+else 
+   for ((i=0; i < "${#SRCVOLS[@]}";i++)) ;do
+      Debug 1 D: ${SRCVOLS[$i]}
+      SNPVOLS[$i]="$( basename "${SRCVOLS[$i]}" )"
+      LNKNAMS[$i]="$( basename $(readlink -f "$(echo ${SRCVOLS[$i]}|sed -e 's/\(.*\)\.[^.][^.]*\.[^.][^.]*$/\1/')" ))"
+      BKPVOLS[$i]="${SRCVOLS[$i]}"
+   done
+fi
+
+Debug 3 SNPVOLS: ${SNPVOLS[*]}
+# This function checks, if a Directory (means the Path and name of a Subvolume) exists or not.
+
+function _verify () {
+   if [ -n "$3" -a -n "$4" ]; then SSH="$3 $4"; else SSH="";fi
+   FILE="${1}/${2}"
+   if $SSH /usr/bin/test -e "${FILE}" ; then
+      echo "$1	$2"; return 0
+   else
+      echo "nonexistant	nonexistant"; return
+   fi
+}
+
+
+# (SRC|SNP|BKP)SUBS are different arrays formed "/mountpoint/snapshotname" for the sources, snaphots local and backup remote
+
+   for((i=0;i<${#SRCVOLS[@]};i++));do 
+      if [ $VERIFY = true ] ;then
+	#Debug "SOURCES= ${SOURCES[$i]}" "${SRCVOLS[$i]}"
+         X=$(_verify "${SOURCES[$i]}" "${SRCVOLS[$i]}");SOURCES[$i]=${X%	*}; SRCVOLS[$i]=${X#*	}
+      fi
+      # trim // if SOURCES is empty or /, then // is possible. This breaks further proceeding
+      SRCSUBS[$i]=$(echo "${SOURCES[$i]}/${SRCVOLS[$i]}" | tr -s /)
+   done
+
+   for((i=0;i<${#SRCVOLS[@]};i++));do
+      if [ $VERIFY = true ] ;then 
+         X=$(_verify "${SNPDESTS[$i]}" "${SNPVOLS[$i]}");SNPDESTS[$i]=${X%	*}; SNPVOLS[$i]=${X#*	}
+      fi
+      SNPSUBS[$i]=$(echo "${SNPDESTS[$i]}/${SNPVOLS[$i]}" | tr -s /)
+      #SNPSUBS[$i]="${SNPDESTS[$i]}/${SNPVOLS[$i]}"
+   done
+
+   for((i=0;i<${#SRCVOLS[@]};i++));do
+      if [ $VERIFY = true ] ;then
+	#Debug "BKPSOURCES= ${BKPDESTS[$i]}" "${BKPVOLS[$i]}"
+          X=$(_verify "${BKPDESTS[$i]}" "${BKPVOLS[$i]}" $SSH);BKPDESTS[$i]=${X%	*}; BKPVOLS[$i]=${X#*	}
+      fi
+      BKPSUBS[$i]=$(echo "${BKPDESTS[$i]}/${BKPVOLS[$i]}" | tr -s /)
+      #BKPSUBS[$i]="${BKPDESTS[$i]}/${BKPVOLS[$i]}"
+   done
+
+
+Debug 5 "SOURCES:   ${SOURCES[@]}"
+Debug 5 "SRCVOLS:   ${SRCVOLS[@]}"
+Debug 5 "BKPVOLS:   (${BKPVOLS[@]})"
+Debug 5 "SRCSUBS:   ${SRCSUBS[@]}"
+Debug 5 "SNPDESTS:  ${SNPDESTS[@]}"
+Debug 5 "SNPVOLS:   (${SNPVOLS[@]})"
+Debug 5 "SNPSUBS:   ${SNPSUBS[@]}"
+Debug 5 "SNPSTORES: ${SNPSTORES[@]}"
+Debug 5 "BKPDESTS:  ${BKPDESTS[@]}"
+Debug 5 "BKPVOLS:   ${BKPVOLS[@]}"
+Debug 5 "BKPSUBS:   ${BKPSUBS[@]}"
+Debug 5 "BKPSTORE:  $BKPSTORE"
+Debug 5 "BKPSTORES: ${BKPSTORES[@]}"
+Debug 5 "SYNCS:     ${SYNCS[@]}"
+Debug 3 "++++++++++++ END Intro - now run the skript for each subvolume on the commandline/config-file ++++++++++++++++++++++++"
+
+Debug 3 CLEANUP: $CLEANUP
+Debug 2 CLEANUPLIST: "${SNPMNT}/${CLEANUPLIST}"
+if $CLEANUP; then
+   if [ -e "${SNPMNT}/${CLEANUPLIST}" ]; then
+      Debug "Cleanup old snapshots from interrupted runs"
+      Run $0 delete $(/bin/cat "${SNPMNT}/${CLEANUPLIST}"|while read i;do [ -e "$i" ] && echo "$i" || echo -n ;done)
+      RE=$(/bin/cat "${SNPMNT}/${CLEANUPLIST}"|while read i;do [ -e "$i" ] && echo -n || printf "%s" "s%$i%%;" ;done)
+      [ -n "$RE" ] && /bin/sed -ie "$RE" "${SNPMNT}/${CLEANUPLIST}"
+      /bin/sed -ie '/^\s*$/d' "${SNPMNT}/${CLEANUPLIST}"
+   fi
+fi
+
+################################################
+# For each subvolume on the commandline or the "backup"-lines in the config-file run the following
+#
+for((loop=0;loop < ${#SRCSUBS[@]};loop++));do
+   Debug 3 "++++++++++++++++ BEGIN subvolume [$loop] (${SRCSUBS[$loop]}) ++++++++++++++++++++++++++++++++++++++"
+   # If $PWD is in the BKPMNT-tree, the SNPMNT must be set new for this run, so the listing of subvolumes is working.
+   echo ${SOURCES[$loop]} |grep -q "$BKPMNT" && { SNPMNTtmp=$BKPMNT; } || SNPMNTtmp=$SNPMNT 
+
+   Debug 2 "SNPMNTtmp: $SNPMNTtmp"
+   # Create an descending list of the given volume and all subvolums down
+   # SRCSUBVOLS descending - start with the given subvolume, the root of the tree for the snapshot as SRCSUBVOLS[0]
+   SRCSUBVOLS=( $($BTRFS subvol list --sort=path  $SNPMNTtmp|awk '{print path"/"$NF}' path="$SNPMNTtmp"|grep "${SRCSUBS[$loop]}$\|${SRCSUBS[$loop]}/" || printf "") )
+   Debug 5 "SRCSUBVOLS:(${SRCSUBVOLS[@]})"
+   Debug 5 "SRCSUBS:(${SRCSUBS[@]})"
+   Debug 3 "CREATE:$CREATE XFER:$XFER DELETE:$DELETE SETPROPERT:$SETPROPERT ROTATE:$ROTATE"
+   if [ $CREATE = true -o $XFER = true ] ; then
+      # Convert SRCSUBVOLS in SNPSUBVOLS
+      Debug 5 "CreateBKPSUBVOLS 1"
+      typeset -i i=0
+      Debug 4 "SRCSUBVOLS-XFER: ${SRCSUBVOLS[$i]}"
+      while [ -n "${SRCSUBVOLS[$i]}" ] ; do
+         SNPSUBVOLS[$i]=${SNPDESTS[$loop]}/$( echo "${SRCSUBVOLS[$i]}" | sed -e 's%^..*'${SRCVOLS[$loop]}'\(.*$\)%'${SNPVOLS[$loop]}'\1%' )
+         BKPSUBVOLS[$i]=${BKPDESTS[$loop]}/$( echo "${SRCSUBVOLS[$i]}" | sed -e 's%^..*'${SRCVOLS[$loop]}'\(.*$\)%'${BKPVOLS[$loop]}'\1%' )
+#         if [ "${BKPSTORES[$i]}" = "none" ]; then
+#            #XFER=false
+#            BKPSTORES[$i]=""
+#            BKPDESTS[$i]=""
+#         fi
+         i=$((i +1))
+      done
+      Debug 5 SYNC=${SYNCS[$loop]}
+      SYNC=${SYNCS[$loop]}
+   else
+      Debug 5 "CreateBKPSUBVOLS 2"
+      SNPTRNVOLS=( $($BTRFS subvol list -o --sort=path  $SNPMNTtmp|awk '{print path"/"$NF}' path="$SNPMNTtmp" \
+	|grep "${SNPSUBS[$loop]}\.\|${SNPSUBS[$loop]}"  || printf "") )
+      [ $bkp = true ] && { BKPTRNVOLS=( $($BTRFS subvol list -o --sort=path  $BKPMNT|awk '{print path"/"$NF}' path="$BKPMNT" \
+	|grep "${BKPSUBS[$loop]}\.\|${BKPSUBS[$loop]}"  || printf "") ); } || BKPTRNVOLS=()
+      SNPSUBVOLS=( $($BTRFS subvol list --sort=path  $SNPMNTtmp|awk '{print path"/"$NF}' path="$SNPMNTtmp" \
+	|grep "${SNPSUBS[$loop]}$\|${SNPSUBS[$loop]}/"  || printf "") )
+      [ $bkp = true ] && { BKPSUBVOLS=( $($SSH $BTRFS subvol list --sort=path  $BKPMNT|awk '{print path"/"$NF}' path="$BKPMNT" \
+	|grep "${BKPSUBS[$loop]}$\|${BKPSUBS[$loop]}/"  || printf "") ); } || BKPSUBVOLS=()
+   fi
+   
+   Debug 5 "---------------------------------"
+   Debug 5 "SOURCES=${SOURCES[$loop]}"
+   Debug 3 "SNPDESTs=${SNPDESTS[$loop]}"
+   Debug 3 "BKPDESTS=${BKPDESTS[$loop]}"
+   Debug 5 "SNPMNTtmp=$SNPMNTtmp"
+   Debug 5 "BKPMNT=$BKPMNT"
+   Debug 5 "SNPSTORE=$SNPSTORE"
+   Debug 5 "BKPSTORES=(${BKPSTORES[@]})"
+   Debug 5 "SRCVOLS=(${SRCVOLS[@]})"
+   Debug 5 "SNPVOLS=(${SNPVOLS[@]})"
+   Debug 5 "BKPVOLS=(${BKPVOLS[@]})"
+   Debug 4 "SRCSUBS=(${SRCSUBS[@]})"
+   Debug 4 "SNPSUBS=(${SNPSUBS[@]})"
+   Debug 4 "BKPSUBS=(${BKPSUBS[@]})"
+   Debug 3 "SRCSUBVOLS=(${SRCSUBVOLS[@]})"
+   Debug 3 "SNPSUBVOLS=(${SNPSUBVOLS[@]})"
+   Debug 3 "BKPSUBVOLS=(${BKPSUBVOLS[@]})"
+   Debug 3 "SNPTRNVOLS=(${SNPTRNVOLS[@]})"
+   Debug 3 "BKPTRNVOLS=(${BKPTRNVOLS[@]})"
+   Debug 5 "SYNC=$SYNC"
+   Debug 3 "###################################################"
+
+
+#LIST
+   # If the script is called with »list«, this section gives the output. 
+   # TODO: reverse output
+   if [ $LIST = true ] ;then
+      for s in ${STORE[@]}; do
+         case $s in
+            SRC)
+               Debug 1 "Subvolumes in snapshot on source-directory (${SRCSUBS[$loop]})"
+               for x in ${SRCSUBVOLS[@]}; do echo $x;done
+               ;;
+            SNP)
+               Debug 1 "Subvolumes in snapshot on snapshot-directory (${SNPSUBS[$loop]})"
+               for x in ${SNPSUBVOLS[@]}; do echo $x;done
+               ;;
+            BKP)
+               Debug 1 "Subvolumes in snapshot on backup-directory  (${BKPSUBS[$loop]} - external HD)"
+               for x in ${BKPSUBVOLS[@]}; do echo $x;done
+               ;;
+            STR)
+               Debug 1 "All snapshots from ${SNPVOLS[$loop]} on snapshot-directory  (${SNPDESTS[$loop]})"
+               for x in ${SNPTRNVOLS[@]}; do echo $x;done
+               ;;
+            BTR)
+               Debug 1 "All snapshots from ${BKPVOLS[$loop]} on backup-directory  (${BKPDESTS[$loop]} - external HD)"
+               for x in ${BKPTRNVOLS[@]}; do echo $x;done
+               ;;
+         esac
+      done
+   fi
+   
+#CREATE
+   # This section creates a new snapshot, when »create« is choosen on commandline
+   #
+   if [ $CREATE = true ];then
+      Debug ""
+      Debug "############################################"
+      Debug "New Run make ${INTERVAL}-snapshot "
+      Debug "Create ${INTERVAL}-snapshot from ${SRCSUBS[$loop]}"
+      Debug 4 "INTERVAL: $INTERVAL"
+      Debug 4 "MAX:      $MAX" 
+      Debug 2 "SOURCES: ${SOURCES[*]}"
+      # Rotate snapshots if --interval dmin|hourly|daily|weekly|monthly is given on commandline
+      if [ -n "$INTERVAL" ] ;then
+         #Run $0 rotate ${SRCSUBS[$loop]} --interval $INTERVAL -m $MAX
+#         DELSNAPS=( $(ls -r "${SOURCES[$loop]}"|grep "$(basename $( echo ${SRCSUBS[$loop]}|sed -e 's%\..$%%'))"\
+#		|grep "$INTERVAL" |sed -n "$(( ${!INTERVAL} +0)),\$p"|awk '{print src"/"$0}' src="${SOURCES[$loop]}") )
+         DELSNAPS=( $(ls -r "${SOURCES[$loop]}"|grep "$(basename $( echo ${SRCSUBS[$loop]}|sed -e 's%\..$%%'))"\
+		|grep "$INTERVAL" |sed -n "$(( ${!INTERVAL} +0)),\$p") )
+         Debug 4 "DELSNAPS: ${DELSNAPS[*]}"
+         for x in ${DELSNAPS[*]};do Debug "Should be deleted: $x"; done
+         if [ $MAX -gt 0 ]; then [ -n "${DELSNAPS[1]}" ] && Run $0 delete SNP ${DELSNAPS[*]}; fi
+      fi
+ 
+      i=0
+      while [ $i -lt ${#SRCSUBVOLS[@]} ];do
+         Debug 4 "stat -t ${SRCSUBVOLS[$i]}"
+         ID=$(stat -t "${SRCSUBVOLS[$i]}"|awk '{print $5":"$6}')
+         # Delete this directory. It's a Subvolume
+         [ -d "${SNPSUBVOLS[$i]}" ] && Run "rm -r ${SNPSUBVOLS[$i]}"
+      
+         # Check subvolume if it's on exclude-list. If so, set CRSUB=1
+         CRSUB=0
+         for excl in ${EXCLUDES[*]}; do
+             Debug 4 "exclude-list: $excl"
+             Debug 4 "SNPVOL: ${SNPSUBVOLS[$i]}"
+             Debug 4 "SNPDEST: ${SNPDESTS[$loop]}"
+             #echo "${SNPSUBVOLS[$i]}" | sed -e 's%^'${SNPDESTS[$loop]}'%%'|grep -q "$excl" && CRSUB=1 
+             Debug 4 "CRSUB: $CRSUB"
+         done
+         if [ $CRSUB -eq 1 ] ;then
+               # Create empty subvolume - directory was on exclude-list
+               Debug 3 "$BTRFS subvolume create ${SNPSUBVOLS[$i]}"
+               Run "$BTRFS subvolume create ${SNPSUBVOLS[$i]}"
+               Debug 4 "chown $ID ${SNPSUBVOLS[$i]}"
+               Run "chown $ID ${SNPSUBVOLS[$i]}"
+        else
+               # Make snapshot of given subvolume - directory was not on exclude-list
+               Debug 3 "$BTRFS subvolume snapshot ${SRCSUBVOLS[$i]} ${SNPSUBVOLS[$i]}"
+               Run "$BTRFS subvolume snapshot ${SRCSUBVOLS[$i]} ${SNPSUBVOLS[$i]}"
+        fi
+
+        Debug 3 $BTRFS property set -ts ${SRCSUBVOLS[$i]} ro false
+        Run $BTRFS property set -ts ${SRCSUBVOLS[$i]} ro false
+        i=$((i +1))
+     done
+      
+      # Set the new snapshot to readonly
+      if [ $RO = true ]; then
+         Debug 4 $0 setprop ro ${SNPSUBS[$loop]}
+         [ "${SNPSUBS[$loop]}" != "/" ] && $0 setprop ro ${SNPSUBS[$loop]}
+      fi
+      
+      if [ $SYMLINK = true ]; then
+         Debug "Create $(basename ${LNKNAMS[$loop]}).${SYMEXTENT}-Link [${BKPVOLS[$loop]}]"
+         Run ln -sfT "${SNPVOLS[$loop]}" "${SNPDESTS[$loop]}/$(basename ${LNKNAMS[$loop]}).${SYMEXTENT}"
+      fi
+
+      # If SYNC=true, transfer the new snapshot in time to the backupstore BKPSTORE
+      if [ x${SYNCS[$loop]} = xtrue ];then
+          if [ "${BKPDESTS[$loop]}" != "" ];then
+             re='^[0-9]+$'
+             [[ $MAX =~ $re ]] && if [ $MAX -gt 0 ]; then
+               Debug 2 "Rotate Backup-Snapshot --interval $INTERVAL -m $MAX"
+               #$0 rotate ${BKPSUBS[$loop]} --interval $INTERVAL -m $MAX
+               #DELSNAPS=( $(ls -r "${BKPDESTS[$loop]}"|grep "$(basename $( echo ${BKPSUBS[$loop]}|sed -e 's%\..$%%'))"\
+		#	|grep "$INTERVAL" |sed -n "$(( ${!INTERVAL} +1)),\$p"|awk '{print src"/"$0}' src="${BKPDESTS[$loop]}") )
+               DELSNAPS=( $(ls -r "${BKPDESTS[$loop]}"|grep "$(basename $( echo ${BKPSUBS[$loop]}|sed -e 's%\..$%%'))"\
+			|grep "$INTERVAL" |sed -n "$(( ${!INTERVAL} +1)),\$p") )
+               Debug 4 "DELSNAPS: ${DELSNAPS[*]}" 
+               for x in ${DELSNAPS[*]};do Debug "Should be deleted: $x"; done
+               if [ $MAX -gt 0 ]; then [ -n "${DELSNAPS[1]}" ] && Run $0 delete BKP ${DELSNAPS[*]}; fi
+            fi
+            Debug 4 "TRANSFER: ${SNPSUBS[$loop]}"
+            Debug 4 "BKPDEST: ${BKPDESTS[$loop]}"
+            Debug 4 "SNPSTORE: ${SNPSTORES[$loop]}"
+            $0 transfer "${SNPSUBS[$loop]}" -L -H "${SYMEXTENT}" -D $BKPSRV $( [ -n "${SNPSTORES[$loop]}" ] && echo " -s ${SNPSTORES[$loop]}")
+            if [ $SYMLINK = true ]; then
+               Debug "Create $(basename ${LNKNAMS[$loop]}).${SYMEXTENT}-Link [${BKPVOLS[$loop]}]"
+               Run ln -sfT "${BKPVOLS[$loop]}" "${BKPDESTS[$loop]}/$(basename ${LNKNAMS[$loop]}).${SYMEXTENT}"
+            fi
+         else
+            Debug "No destination-target for backing up this snapshot given. -> no transfer"
+         fi
+      fi
+      
+      if [ $BOOTABLE = true ];then
+         $0 setboot "${SNPSUBS[$loop]}"
+      fi
+
+#sleep 10
+
+      Debug "Finnished creation of snapshot ${SRCSUBS[$loop]}"
+      Debug "Finnished ${INTERVAL}-snapshot "
+      Debug "################################################"
+   fi
+   
+
+#ROTATE
+   # This section rotates a snapshot with an interval-tag.
+   #
+   function _rotatesnap () {
+      int=${3}
+      ROTSNAPS=( $(ls "$1"|grep "$2" | grep "$3"|| printf "") )
+      DELSNAPS=( $(ls -r "$1"|grep "$2" | grep "$3"|sed -n "$(( ${!int} +1)),\$p") )
+      for x in ${DELSNAPS[*]};do Debug "Should be deleted: $x"; done
+      Run $0 delete ${DELSNAPS[*]};
+   }
+   
+   function _rotatesnap-num () {
+      int=${3}
+      ROTSNAPS=( $(ls "$1"|grep "$2\..*$3_[0-9]\+$" || printf "") )
+
+      #typeset -i del=0
+      del=0
+      for ROTSNAP in ${ROTSNAPS[*]}; do
+         Debug 4 "ROTSNAP: $ROTSNAP"
+         #typeset -i ind=${ROTSNAP##*_}
+         ind=${ROTSNAP##*_}
+         ind=$((ind +1))
+         [ $ind -gt $(echo ${!int}) ] && { DELSNAPS[$del]="${1}/${ROTSNAP%_*}_${ind}"; del=$((del +1)); }
+         Run mv "${1}/${ROTSNAP}" "${1}/${ROTSNAP%_*}_${ind}"
+      done
+      for x in ${DELSNAPS[*]};do Debug "Should be deleted: $x"; done
+   }
+   
+   if [ $ROTATE = true ] ;then
+	 Debug "SRCSUBS to Rotate" ${SRCSUBS[$loop]} " : " ${SRCVOLS[$loop]}
+      # If Sourcesnapshot does not exist, continue
+      [ "${SRCVOLS[$loop]}" = "nonexistant" ] && { loop=$((loop + 1)); continue; }
+      Debug "Rotate snapshot ${SOURCES[$loop]}/${SRCVOLS[$loop]}"
+
+      # Rotate Snapshots
+      [ -z "$INTERVAL" ] && { echo "give me an interval (manually|dmin|hourly|daily|weekly|monthly), which i should rotate. Use option »--interval«"; usage; }
+      Debug 4 _rotatesnap "${SOURCES[$loop]}" "$( echo ${SRCSUBS[$loop]}|sed -e 's%\.[0-9]\{8\}-[0-9]\{6\}\.[a-z]\+_[0-9]\+$%%')" "$INTERVAL"
+      #_rotatesnap "${SOURCES[$loop]}" "$(basename $( echo ${SRCSUBS[$loop]}|sed -e 's%\..$%%'))" "$INTERVAL"
+      DELSNAPS=( $(ls -r "${SOURCES[$loop]}"|grep "$(basename $( echo ${SRCSUBS[$loop]}|sed -e 's%\..$%%'))"|grep "$INTERVAL" |sed -n "$(( ${!INTERVAL} +1)),\$p") )
+      for x in ${DELSNAPS[*]};do Debug "Should be deleted: $x"; done
+      #_rotatesnap-num "${SOURCES[$loop]}" "$(basename $( echo ${SRCSUBS[$loop]}|sed -e 's%\.[0-9]\{8\}-[0-9]\{6\}\.[a-z]\+_[0-9]\+$%%'))" "$INTERVAL"
+      Debug 3 "INTERVAL_MAX: $INTERVAL_$MAX"
+      Debug 3 "DELSNAPS: ${DELSNAPS[@]}"
+      if [ $MAX -gt 0 ]; then [ -n "${DELSNAPS[1]}" ] && Run $0 delete ${DELSNAPS[*]}; fi
+   fi 
+
+
+#SETPROP
+   # This section sets a whole snapshot and its subvolumes to read-write or readonly
+   # 
+   if [ $SETPROPERT = true ]; then
+      Debug "Set property to $PROP on ${SRCSUBS[$loop]}"
+      case $PROP in
+          ro)
+             i=${#SRCSUBVOLS[@]}
+             while [ $i -gt 0 ];do
+                i=$((i - 1))
+                Debug 3 "$BTRFS property set -ts ${SRCSUBVOLS[$i]} ro true"
+                Run "$BTRFS property set -ts ${SRCSUBVOLS[$i]} ro true"
+                Debug 1 "Check: $( $BTRFS property get -ts ${SRCSUBVOLS[$i]} ro ): ${SUBVOL}"
+             done
+             ;;
+          rw)
+             for SUBVOL in ${SRCSUBVOLS[@]}; do 
+                Debug 3 "$BTRFS property set -ts ${SUBVOL} ro false"
+                Run "$BTRFS property set -ts ${SUBVOL} ro false;"
+                Debug 1 "Check: $( $BTRFS property get -ts ${SUBVOL} ro ): ${SUBVOL}"
+             done
+             ;;
+      esac 
+   
+   fi
+
+#DELETE
+   # This section deletes a snapshot/subvol recursivly on the source, the snapshots or the backup-store.
+   #
+   if [ $DELETE = true ];then
+      Debug "Prepare to delete subvolumes/subvolumes"
+      DELSUBS=""
+      DELSUBVOLS=""
+      for S in ${STORE[@]};do
+         case $S in
+            SRC)
+		Debug "SRCVOLS: ${SRCVOLS[$loop]} - SRCSUBVOLS: ${SRCSUBVOLS[$i]}"
+               if [ "${SRCVOLS[$loop]}" != "nonexistant" ] ;then
+                  Debug 3 "SRC Add to delete-list ${SRCSUBS[$loop]} : ${SRCVOLS[$loop]}"
+                  DELSUBS="$DELSUBS ${SRCSUBS[$loop]}"
+                  i=${#SRCSUBVOLS[@]}
+                  while [ $i -gt 0 ];do
+                     i=$((i - 1))
+                     DELSUBVOLS="$DELSUBVOLS ${SRCSUBVOLS[$i]}"
+                  done
+               fi
+               ;;
+            SNP)
+               if [ "${SNPVOLS[$loop]}" != "nonexistant" ] ;then
+                  Debug 3 "SNP Add to delete-list ${SNPSUBS[$loop]} ${SNPVOLS[$loop]}"
+                  DELSUBS="$DELSUBS ${SNPSUBS[$loop]}"
+                  i=${#SNPSUBVOLS[@]}
+                  while [ $i -gt 0 ];do
+                     i=$((i - 1))
+                     DELSUBVOLS="$DELSUBVOLS ${SNPSUBVOLS[$i]}"
+                  done
+               fi
+               ;;
+            BKP)
+               if [ "${BKPVOLS[$loop]}" != "nonexistant" ] ;then
+                  Debug 3 "BKP Add to delete-list ${BKPSUBS[$loop]} ${BKPVOLS[$loop]}"
+                  DELBKPSUBS="$DELBKPSUBS ${BKPSUBS[$loop]}"
+                  i=${#BKPSUBVOLS[@]}
+                  while [ $i -gt 0 ];do
+                     i=$((i - 1))
+                     DELBKPSUBVOLS="$DELBKPSUBVOLS ${BKPSUBVOLS[$i]}"
+                  done
+               fi
+               ;;
+         esac
+      done
+
+      Debug 3 "Delete local subvolumes: $DELSUBS"
+      [ -n "$DELSUBS" ]    && Run $0 setprop rw ${DELSUBS}
+      [ -n "$DELSUBVOLS" ] && { Debug "Delete them..."; Run $BTRFS subvolume delete ${DELSUBVOLS}; }
+
+      Debug 3 "Delete remote/backup subvolumes: $DELBKPSUBS"
+      [ -n "$DELBKPSUBS" ]    && Run $SSH $0 setprop rw ${DELBKPSUBS}
+      [ -n "$DELBKPSUBVOLS" ] && { Debug "Delete them..."; Run $SSH $BTRFS subvolume delete ${DELBKPSUBVOLS}; }
+
+      unset DELSUBS
+      unset DELSUBVOLS
+      unset DELBKPSUBS
+      unset DELBKPSUBVOLS
+   fi
+
+#TRANSFER
+   # This sections transfers a given snapshot in store SNP to store BKP. 
+   # If the an older snapshot exists in both stores, an incremental snapshot is transferred, if not, the actual snapshot is transferred to BKP.
+   #
+   if [ $XFER = true -a "${BKPDEST[$loop]}" != "none" ];then
+
+      #transfercheck is now in the header
+      if [ $checkonly = true ]; then
+         Debug "Same Subvolumes on SNP and BKP"
+         Debug 3 transfercheck "$SNPMNT" "$BKPMNT" "${SNPSUBS[$loop]}"
+         transfercheck "$SNPMNT" "$BKPMNT" "${SNPSUBS[$loop]}"
+         echo -n "==> " ; transfercheck "$SNPMNT" "$BKPMNT" "${SNPSUBS[$loop]}"|tail -n 1
+      else
+   
+         if [ $bkp = true ] ; then
+            Debug "Start Transfer [$loop] ${SNPSUBS[$loop]} to ${BKPDESTS[$loop]}"
+            Run $0 setprop ro ${SNPSUBS[$loop]}
+   
+            # Get all snapshots local and remote, to compare, if there are an equal on each side for the incremental backup
+            # compares uuid, received_uuid and parent uuid to check if there is an propriate subvolume as parent-subvol to transfer
+            #samesame=$(transfercheck "$SNPMNT" "$BKPMNT" "${SNPSUBS[$loop]}"|sort -r -k 1|tail -n 1|awk '{print $3}')
+            samesame=$(transfercheck "$SNPMNT" "$BKPMNT" "${SNPSUBS[$loop]}"|tail -n 1)
+            Debug   "Choosen parent-snapshot: $samesame"
+
+
+            if [ -n "$samesame" ]; then
+               Debug 2 "Parent for incremental backup is existing on SNP and BKP"
+               PARENTSUBVOLS=( $( $0 list SNP -q "$(basename $samesame)" ) )
+   
+               i=0
+               for snp in ${SNPSUBVOLS[@]};do
+                  for par in ${PARENTSUBVOLS[@]};do
+                     Debug 5 $par : $( echo ${snp}|sed -e 's%^'${SNPSUBVOLS[0]}'%'$samesame'%' )
+                     if [ "$par" = "$( echo ${snp}|sed -e 's%^'${SNPSUBVOLS[0]}'%'$samesame'%' )" ]; then 
+                        DIFFTRANS[$i]=true
+                        i=$((i + 1))
+                        Debug 3 "DIFF-Trans ${SNPSUBVOLS[0]}"
+                        continue 2
+                     fi
+                  done
+                  Debug 3 "FULL-Trans ${SNPSUBVOLS[0]}"
+                  DIFFTRANS[$i]=false
+                  i=$((i + 1))
+               done
+            else
+               Debug 2 "Parent for incremental backup is missing -> make initial backup"
+               for (( i=0;i<${#SNPSUBVOLS[@]};i++)); do
+                  DIFFTRANS[$i]=false
+               done
+            fi
+
+            if [ $INIT == true ]; then
+                  Debug "Make initial-transfer... [${SRCSUBVOLS[$i]}]"
+                  Debug "  --> ${BKPSUBVOLS[$i]}]"
+      
+                  # Send the snapshots to remote (no increments!)
+                  Run "sync"
+                  #Debug "BKPSUBVOLS: $(dirname ${BKPSUBVOLS[$i]})"
+                  #Debug "END BKPSUBVOLS"
+
+                  Run "$BTRFS send ${SRCSUBVOLS[$i]} | $SSH $BTRFS receive $(dirname ${BKPSUBVOLS[$i]})"
+      
+                  # Set this subvolume to read-write, so the next subvol down can be written!
+                  Run $SSH $BTRFS property set -ts "${BKPSUBVOLS[$i]}" ro false
+            else   
+      
+               for (( i=0;i<${#DIFFTRANS[@]};i++)); do
+                  Debug 4 "DIFFTRANS: ${DIFFTRANS[$i]}"
+                  if [ ${DIFFTRANS[$i]} != true -o $INIT == true ]; then
+                     Debug "Make initial ${SYMEXTENT}-transfer... [${SNPSUBVOLS[$i]}]"
+                     Debug "  --> ${BKPSUBVOLS[$i]}]"
+         
+                     # Send the snapshots to remote (no increments!)
+                     Run "sync"
+                     #Debug "BKPSUBVOLS: $(dirname ${BKPSUBVOLS[$i]})"
+                     #Debug "END BKPSUBVOLS"
+   
+                     Run "$BTRFS send ${SNPSUBVOLS[$i]} | $SSH $BTRFS receive $(dirname ${BKPSUBVOLS[$i]})"
+         
+                     # Set this subvolume to read-write, so the next subvol down can be written!
+                     Run $SSH $BTRFS property set -ts "${BKPSUBVOLS[$i]}" ro false
+         
+                  else
+                     Debug  "Transfer ${SYMEXTENT}-differences [parent $samesame "
+                     Debug  "  --> ${SNPSUBVOLS[$i]}...]"
+         
+                     # Remove the directory, where the new subvolume has to be created
+                     [ -d "${BKPSUBVOLS[$i]}" ] && Run rm -r "${BKPSUBVOLS[$i]}"
+          
+                     # Each subvolume from the whole snapshot has to be send extra. 
+                     # So lets convert the subvolumepathes from the parent-snapshot
+                     samesubvol=$( echo ${SNPSUBVOLS[$i]}|sed -e 's%^'${SNPSUBS[$loop]}'%'$samesame'%' )
+                     Debug 3 "samesubvol: $samesubvol ${SNPSUBVOLS[$i]}"
+         
+                     # Make the parent-snapshot read-only, so send can work
+                     Run "$BTRFS property set -ts $samesubvol ro true"
+         
+                     # Lets send the incremental backup 
+                     Run "sync"
+                     Run "$BTRFS send -p $samesubvol ${SNPSUBVOLS[$i]} | $SSH $BTRFS receive $(dirname ${BKPSUBVOLS[$i]})"
+                   
+                     # Set the sent subvolume to read-write, so the next subvol down can be sent
+                     Run $SSH "$BTRFS property set -ts ${BKPSUBVOLS[$i]}" ro false
+         
+                  fi
+               done
+            fi
+            Debug  "Finished transfer [$loop]"
+         fi
+      fi
+   fi
+
+   if [ $FSTAB = true ]; then
+      Debug "Modify /etc/fstab-entry for / in ${SNPDESTS[$loop]}/${SNPVOLS[0]}/etc/fstab"
+      if [ -e "${SNPDESTS[$loop]}/${SNPVOLS[0]}/etc/fstab" ];then
+        $0 setprop rw "${SNPDESTS[$loop]}/${SNPVOLS[0]}"
+        ROOTSUB="$(basename $( echo ${SNPSUBS[$loop]}|sed -e 's%\.[0-9]\{8\}-[0-9]\{6\}\(\.[a-z0-9]\+\(_[0-9]\+\)*\)*$%%'))"
+        SRCID=$($BTRFS subvol list -o --sort=path  $SNPMNTtmp|awk '{print $2,path"/"$NF}' path="$SNPMNTtmp" \
+	     |grep "${SRCSUBS[$loop]}$"|awk '{print $1}')
+	Run sed -i -e 's%'${ROOTSUB}'%'${SRCID}'%' "${SNPDESTS[$loop]}/${SNPVOLS[0]}/etc/fstab"
+      else
+         Debug "No bootable snapshot. I did nothing"
+      fi
+   fi
+
+   Debug 3 "++++++++++++++++ END subvolume [$loop] (${SRCSUBS[$loop]}) ++++++++++++++++++++++++++++++++++++++"
+done
+
+rm $lock
+exit 0
