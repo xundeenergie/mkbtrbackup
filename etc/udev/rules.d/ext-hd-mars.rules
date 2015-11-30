@@ -1,0 +1,7 @@
+#KERNEL=="sd?6", SUBSYSTEMS=="usb", ATTRS{manufacturer}=="asmedia", ATTRS{idVendor}=="174c", ATTRS{idProduct}=="55aa", SYMLINK+="disk/mars" \
+ACTION=="add", KERNEL=="sd?6", SUBSYSTEMS=="usb", ATTRS{idVendor}=="174c", SYMLINK+="disk/mars", TAG+="systemd", ENV{SYSTEMD_WANTS}+="backup-automount.target mkbackup@manually.timer"
+#ACTION=="add", KERNEL=="sd?6", SUBSYSTEMS=="usb", ATTRS{idVendor}=="174c", SYMLINK+="disk/mars", TAG+="systemd", ENV{SYSTEMD_WANTS}+="mkbackup@manually.timer var-cache-backup.automount"
+
+ACTION=="remove", KERNEL=="sd?6", SUBSYSTEMS=="usb", ATTRS{idVendor}=="174c", ATTRS{idProduct}=="55aa", \
+RUN+="/bin/systemctl --no-block stop backup-automount.target mkbackup@manually.timer"
+#RUN+="/bin/systemctl --no-block stop mkbackup@manually.timer var-cache-backup.automount"
