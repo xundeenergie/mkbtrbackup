@@ -90,14 +90,14 @@ SETPROPERT=false
 DATE=`date +%Y%m%d-%H%M%S`
 
 # Defaults for hourly, daily, weekly and monthly snapshots to be hold in stack. (only the highest index counts, not the count of snapshots!!)
-apt_upgrade=5
-afterboot=5
+apt_upgrade=3
+afterboot=3
 dmin=6
 hourly=24
 daily=7
 weekly=4
 monthly=12
-manually=10
+manually=5
 
 # If MAX=true, a snapshot highter than the defaults above is deleted. 
 MAX=true
@@ -563,10 +563,10 @@ lock=${lock}.pid
 # shlock (from inn) does the right thing and grabs a lock for a dead process
 # (it checks the PID in the lock file and if it's not there, it
 # updates the PID with the value given to -p)
-if ! $SHLOCK -p $$ -f $lock; then
-    echo "$lock held for $PROG, quitting" >&2
-    exit
-fi
+#if ! $SHLOCK -p $$ -f $lock; then
+#    echo "$lock held for $PROG, quitting" >&2
+#    exit
+#fi
 
 # Trap errors for logging before we die (so that they can be picked up # by the log checker) 
 trap 'die "Error line $LINENO with status $?"' ERR
@@ -889,14 +889,14 @@ else
          SOURCES[$i]="$(dirname ${SRCVOLS[$i]} 2>/dev/null)"
       fi
       SRCVOLS[$i]="$(basename ${SRCVOLS[$i]})"
-      SNPSTORES[$i]="${SNPSTORE}"
+      SNPSTORES[$i]="${SNPSTORES}"
       SNPDESTS[$i]="$(readlink -f ${SNPMNT}/${SNPSTORES[$i]} 2>/dev/null)"
       SYNCS[$i]=$SYNC
 
       if [ $bkp = true ];then
+         BKPSTORES[$i]="${BKPSTORES}"
          BKPDESTS[$i]="$($SSH readlink -e ${BKPMNT}/${BKPSTORES[$i]} 2>/dev/null || { $SSH mkdir -p ${BKPMNT}/${BKPSTORES[$i]} 2>/dev/null && $SSH readlink -e ${BKPMNT}/${BKPSTORES[$i]} 2>/dev/null; } )"
          #BKPDESTS[$i]="$(readlink -e ${BKPMNT}/${BKPSTORE} 2>/dev/null && { mkdir -p ${BKPMNT}/${BKPSTORE} 2>/dev/null; readlink -f ${BKPMNT}/${BKPSTORE} 2>/dev/null; } || readlink -f ${BKPMNT}/${BKPSTORE} 2>/dev/null)"
-         #BKPSTORES[$i]="${BKPSTORE}"
       else 
          BKPDESTS=()
       fi
@@ -917,7 +917,8 @@ if [ $CREATE = true ] ;then
    for ((i=0; i < "${#SRCVOLS[@]}";i++)) ;do
       Debug 1 "$(echo ${SRCVOLS[$i]}|sed -e 's/\(.*\)\.[^.][^.]*\.[^.][^.]*$/\1/')${EXTENT}"
       #SNPVOLS[$i]="$( basename $(readlink -f "${SRCVOLS[$i]}${EXTENT}" ))"
-      LNKNAMS[$i]="$( basename $(readlink -f "$(echo ${SRCVOLS[$i]}|sed -e 's/\(.*\)\.[^.][^.]*\.[^.][^.]*$/\1/')" ))"
+      #LNKNAMS[$i]="$( basename $(readlink -f "$(echo ${SRCVOLS[$i]}|sed -e 's/\(.*\)\.[^.][^.]*\.[^.][^.]*$/\1/')" ))"
+      LNKNAMS[$i]="$( basename $(readlink -f "$(echo ${SRCVOLS[$i]}|sed -e 's/^\(.*\)\..*$/\1/')" ))"
       SNPVOLS[$i]="$( basename $(readlink -f "$(echo ${SRCVOLS[$i]}|sed -e 's/\(.*\)\.[^.][^.]*\.[^.][^.]*$/\1/')${EXTENT}" ))"
       BKPVOLS[$i]="${SNPVOLS[$i]}"
    done
@@ -925,7 +926,8 @@ else
    for ((i=0; i < "${#SRCVOLS[@]}";i++)) ;do
       Debug 1 D: ${SRCVOLS[$i]}
       SNPVOLS[$i]="$( basename "${SRCVOLS[$i]}" )"
-      LNKNAMS[$i]="$( basename $(readlink -f "$(echo ${SRCVOLS[$i]}|sed -e 's/\(.*\)\.[^.][^.]*\.[^.][^.]*$/\1/')" ))"
+      #LNKNAMS[$i]="$( basename $(readlink -f "$(echo ${SRCVOLS[$i]}|sed -e 's/\(.*\)\.[^.][^.]*\.[^.][^.]*$/\1/')" ))"
+      LNKNAMS[$i]="$( basename $(readlink -f "$(echo ${SRCVOLS[$i]}|sed -e 's/^\(.*\)\..*$/\1/')" ))"
       BKPVOLS[$i]="${SRCVOLS[$i]}"
    done
 fi
@@ -934,7 +936,7 @@ Debug 3 SNPVOLS: ${SNPVOLS[*]}
 # This function checks, if a Directory (means the Path and name of a Subvolume) exists or not.
 
 function _verify () {
-   if [ -n "$3" -a -n "$4" ]; then SSH="$3 $4"; else SSH="";fi
+   #if [ -n "$3" -a -n "$4" ]; then SSH="$3 $4"; else SSH="";fi
    FILE="${1}/${2}"
    if $SSH /usr/bin/test -e "${FILE}" ; then
       echo "$1	$2"; return 0
@@ -1046,6 +1048,7 @@ for((loop=0;loop < ${#SRCSUBS[@]};loop++));do
    fi
    
    Debug 5 "---------------------------------"
+   Debug 3 "loop=$loop"
    Debug 5 "SOURCES=${SOURCES[$loop]}"
    Debug 3 "SNPDESTs=${SNPDESTS[$loop]}"
    Debug 3 "BKPDESTS=${BKPDESTS[$loop]}"
@@ -1053,9 +1056,9 @@ for((loop=0;loop < ${#SRCSUBS[@]};loop++));do
    Debug 5 "BKPMNT=$BKPMNT"
    Debug 5 "SNPSTORE=$SNPSTORE"
    Debug 5 "BKPSTORES=(${BKPSTORES[@]})"
-   Debug 5 "SRCVOLS=(${SRCVOLS[@]})"
-   Debug 5 "SNPVOLS=(${SNPVOLS[@]})"
-   Debug 5 "BKPVOLS=(${BKPVOLS[@]})"
+   Debug 3 "SRCVOLS=(${SRCVOLS[@]})"
+   Debug 3 "SNPVOLS=(${SNPVOLS[@]})"
+   Debug 3 "BKPVOLS=(${BKPVOLS[@]})"
    Debug 4 "SRCSUBS=(${SRCSUBS[@]})"
    Debug 4 "SNPSUBS=(${SNPSUBS[@]})"
    Debug 4 "BKPSUBS=(${BKPSUBS[@]})"
@@ -1112,12 +1115,10 @@ for((loop=0;loop < ${#SRCSUBS[@]};loop++));do
       # Rotate snapshots if --interval dmin|hourly|daily|weekly|monthly is given on commandline
       if [ -n "$INTERVAL" ] ;then
          #Run $0 rotate ${SRCSUBS[$loop]} --interval $INTERVAL -m $MAX
-#         DELSNAPS=( $(ls -r "${SOURCES[$loop]}"|grep "$(basename $( echo ${SRCSUBS[$loop]}|sed -e 's%\..$%%'))"\
-#		|grep "$INTERVAL" |sed -n "$(( ${!INTERVAL} +0)),\$p"|awk '{print src"/"$0}' src="${SOURCES[$loop]}") )
          DELSNAPS=( $(ls -r "${SOURCES[$loop]}"|grep "$(basename $( echo ${SRCSUBS[$loop]}|sed -e 's%\..$%%'))"\
 		|grep "$INTERVAL" |sed -n "$(( ${!INTERVAL} +0)),\$p") )
          Debug 4 "DELSNAPS: ${DELSNAPS[*]}"
-         for x in ${DELSNAPS[*]};do Debug "Should be deleted: $x"; done
+         for x in ${DELSNAPS[*]};do Debug "Should be deleted: SNP $x"; done
          if [ $MAX -gt 0 ]; then [ -n "${DELSNAPS[1]}" ] && Run $0 delete SNP ${DELSNAPS[*]}; fi
       fi
  
@@ -1168,16 +1169,12 @@ for((loop=0;loop < ${#SRCSUBS[@]};loop++));do
       # If SYNC=true, transfer the new snapshot in time to the backupstore BKPSTORE
       if [ x${SYNCS[$loop]} = xtrue ];then
           if [ "${BKPDESTS[$loop]}" != "" ];then
-             re='^[0-9]+$'
-             [[ $MAX =~ $re ]] && if [ $MAX -gt 0 ]; then
-               Debug 2 "Rotate Backup-Snapshot --interval $INTERVAL -m $MAX"
-               #$0 rotate ${BKPSUBS[$loop]} --interval $INTERVAL -m $MAX
-               #DELSNAPS=( $(ls -r "${BKPDESTS[$loop]}"|grep "$(basename $( echo ${BKPSUBS[$loop]}|sed -e 's%\..$%%'))"\
-		#	|grep "$INTERVAL" |sed -n "$(( ${!INTERVAL} +1)),\$p"|awk '{print src"/"$0}' src="${BKPDESTS[$loop]}") )
-               DELSNAPS=( $(ls -r "${BKPDESTS[$loop]}"|grep "$(basename $( echo ${BKPSUBS[$loop]}|sed -e 's%\..$%%'))"\
+      	     if [ -n "$INTERVAL" ] ;then
+               Debug 1 "Rotate Backup-Snapshot --interval $INTERVAL -m $MAX"
+               DELSNAPS=( $(ls -r "${BKPDESTS[$loop]}"|grep "$(basename $( echo ${BKPSUBS[$loop]}|sed -e 's%\..*$%%'))"\
 			|grep "$INTERVAL" |sed -n "$(( ${!INTERVAL} +1)),\$p") )
                Debug 4 "DELSNAPS: ${DELSNAPS[*]}" 
-               for x in ${DELSNAPS[*]};do Debug "Should be deleted: $x"; done
+               for x in ${DELSNAPS[*]};do Debug "Should be deleted: BKP $x"; done
                if [ $MAX -gt 0 ]; then [ -n "${DELSNAPS[1]}" ] && Run $0 delete BKP ${DELSNAPS[*]}; fi
             fi
             Debug 4 "TRANSFER: ${SNPSUBS[$loop]}"
@@ -1466,5 +1463,5 @@ for((loop=0;loop < ${#SRCSUBS[@]};loop++));do
    Debug 3 "++++++++++++++++ END subvolume [$loop] (${SRCSUBS[$loop]}) ++++++++++++++++++++++++++++++++++++++"
 done
 
-rm $lock
+[ -e "$lock" ] && rm $lock
 exit 0

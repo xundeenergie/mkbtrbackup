@@ -1,18 +1,26 @@
 [Unit]
 Description=Balance btrfs-filesystem %f
-ConditionPathExists=!/run/btrfs-balance-systemd.lock
-ConditionPathExists=!/run/mkbackup-systemd.lock
+
+ConditionPathExists=!/run/btrfs-actions
+ConditionDirectoryNotEmpty=!/run/btrfs-actions
+ConditionPathExists=!/run/mkbackup
+ConditionDirectoryNotEmpty=!/run/mkbackup
 ConditionACPower=true
+
 Conflicts=suspend.target shutdown.target
 OnFailure=status-email-root@%n.service
 
 [Service]
-Type=oneshot
-Nice=10
+RuntimeDirectory=btrfs-actions
+Type=simple
+
+Nice=12
 IOSchedulingClass=3
+#IOSchedulingPriority=
 CPUSchedulingPolicy=idle
-ExecStartPre=/bin/touch /run/btrfs-balance-systemd.lock
+
+ExecStartPre=/bin/touch /run/btrfs-actions/balance-systemd.lock
 ExecStart=/bin/btrfs balance start -dusage=55 -v %f
 ExecStop=/etc/systemd/system/scripts/btrfs-action.sh %f balance $MAINPID
-ExecStopPost=/bin/rm /run/btrfs-balance-systemd.lock
+ExecStopPost=/bin/rm /run/btrfs-actions/balance-systemd.lock
 

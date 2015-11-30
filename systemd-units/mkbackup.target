@@ -8,7 +8,7 @@ Description=Enables all backup.timers and backup.services
 
 
 [Install]
-WantedBy=basic.target
+WantedBy=timers.target
 #Also=mkbackup@afterboot.timer 
 #Also=mkbackup@dmin.timer 
 #Also=mkbackup@hourly.timer 

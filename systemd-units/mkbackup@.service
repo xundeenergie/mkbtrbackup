@@ -1,36 +1,36 @@
 [Unit]
 Description=Make %i-backup from system-subvolume
+
+#ConditionPathExists=!/run/btrfs-actions
+#ConditionDirectoryNotEmpty=!/run/btrfs-actions
 ConditionPathExists=!/run/mkbackup
-ConditionPathExists=!/run/btrfs-balance-systemd.lock
-#Requires=var-cache-btrfs_pool_SYSTEM.mount set-environ.service
+ConditionPathExists=!/run/btrfs-actions
+ConditionDirectoryNotEmpty=!/run/mkbackup
+
 Requires=set-environ.service
+Wants=dpkg-get-selection.service
+After=set-environ.service dpkg-get-selection.service mkbackup.target
+#After=set-environ.service dpkg-get-selection.service
+
 Conflicts=suspend.target shutdown.target sleep.target
-Wants=update-backuplinks.target dpkg-get-selection.service
-Before=update-backuplinks.target
-After=set-environ.service dpkg-get-selection.service basic.target
 OnFailure=status-email-root@%n.service
 
 [Service]
 #Type=oneshot
-Type=idle
+#Type=idle
 EnvironmentFile=/etc/mkbtrbackup.conf.d/%i.conf
 RuntimeDirectory=mkbackup
-#Nice=
+
+Nice=10
 IOSchedulingClass=3
 #IOSchedulingPriority=
+CPUSchedulingPolicy=idle
 
 ExecStartPre=/bin/sh -c "(/bin/systemctl is-active -q mkbackup.target)"
+ExecStartPre=/bin/touch /run/mkbackup/%i-systemd.lock
 ExecStart=/usr/local/bin/mkbtrbackup create --interval %i ${SRC}/${SYSSUBVOL} --cleanup -L ${OPTIONS} 
-
-
-#ExecStartPre=/bin/touch /run/mkbackup-%i-systemd.lock
-#ExecStartPost=-/bin/rm /run/mkbackup-%i-systemd.lock
-#ExecStartPre=/bin/sh -c "!(/bin/systemctl is-active -q btrfs-balance@var-cache-btrfs_pool_SYSTEM.service)"
-#ExecStartPre=/bin/sh -c "!(/bin/systemctl is-active -q btrfs-balance@var-cache-backup.service)"
-#ExecStop=/bin/kill -s 15 $MAINPID 
-#ExecStopPost=-/bin/systemctl start update-backuplinks.target
-#PIDFile=/var/run/mkbackup_create_%i.pid
-
+ExecStopPost=-/bin/systemctl start update-backuplinks.target
+ExecStopPost=-/bin/rm /run/mkbackup/%i-systemd.lock
 
 [Install]
 WantedBy=timer-%i.target 

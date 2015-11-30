@@ -1,9 +1,10 @@
 [Unit]
-Description=Runs btrfs-balance on %I weekly
-ConditionPathIsMountPoint=%I
+Description=Runs btrfs-balance on %f weekly
+ConditionPathIsMountPoint=%f
 
 [Timer]
-OnCalendar=weekly
+OnCalendar=Wed *-*-* 00:00:00
+#OnCalendar=weekly
 Persistent=true
 Unit=btrfs-balance@%i.service
 

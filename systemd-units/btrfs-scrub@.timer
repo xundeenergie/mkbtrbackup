@@ -1,6 +1,6 @@
 [Unit]
-Description=Runs btrfs-balance on %I weekly
-ConditionPathIsMountPoint=%I
+Description=Runs btrfs-balance on %f weekly
+ConditionPathIsMountPoint=%f
 
 [Timer]
 OnCalendar=Mon *-*-* 00:00:00

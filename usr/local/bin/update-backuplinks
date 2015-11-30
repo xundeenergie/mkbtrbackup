@@ -22,6 +22,7 @@ find "$USERBKPDIR/" -maxdepth 1 -mindepth 1 -type l | xargs rm -f
 
 		case $k in
 		   *afterboot)LSTBT="--afterboot";;
+		   *apt_upgrade)LSTBT="--before-upgrade";;
 		   *)LSTBT="";;
 		esac
 
