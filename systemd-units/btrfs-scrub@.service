@@ -1,5 +1,8 @@
 [Unit]
-Description=Scrub btrfs-filesystem %f
+#Description=Scrub btrfs-filesystem %f %i
+Description=Scrubs filesystem on %f weekly
+#Wants=btrfs-balance@%i.service
+#After=btrfs-balance@%i.service
 
 ConditionPathExists=!/run/btrfs-actions
 ConditionDirectoryNotEmpty=!/run/btrfs-actions

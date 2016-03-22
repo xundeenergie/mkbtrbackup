@@ -6,7 +6,8 @@ OnFailure=status-email-root@%n.service
 OnBootSec=15min
 OnUnitActiveSec=1h
 Unit=timer-hourly.target
-AccuracySec=5min
+AccuracySec=1us
+RandomizedDelaySec=10min
 
 [Install]
 WantedBy=basic.target
